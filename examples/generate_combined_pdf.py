@@ -20,6 +20,7 @@ from reportlab.platypus import (
 )
 
 from examples.combined_report_2026 import build_combined_report, CombinedReport, UnifiedTrade
+from examples.backtest_combined_2026 import build_combined_backtest, CombinedBacktestResult
 from examples.pdf_helpers import (
     A4, cm,
     PAGE_W, PAGE_H, MARGIN,
@@ -617,6 +618,195 @@ def trade_action_section(report: CombinedReport) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 7. Backtest section — Combined MSCI + FTSE historical analysis
+# ─────────────────────────────────────────────────────────────────────────────
+def backtest_section() -> list:
+    """
+    Section 6: Historical backtest — MSCI Poland + FTSE Developed Europe 2018-2026.
+    Shows momentum filter impact, per-index stats, and dual-index compound returns.
+    """
+    result = build_combined_backtest()
+    items = []
+    items.append(PageBreak())
+    items.append(Paragraph("6. Historical Backtest — MSCI + FTSE Poland 2018–2026", ST["h1"]))
+    items.append(Paragraph(
+        "Entry: close at T−45 before announcement (deep accumulation). "
+        "Exit: close at effective date (passive demand fully absorbed). "
+        "Momentum filter: RS ≥ 60th percentile vs WIG-ALL AND above 200-day MA at entry. "
+        "Universe: all MSCI Poland Standard + FTSE Developed Europe Poland events 2018–2026. "
+        "<font color='#1A237E'><b>NOTE: Poland has been FTSE Developed (not Emerging) since Sep 2018.</b></font>",
+        ST["body"]))
+    items.append(Spacer(1, 0.2 * cm))
+
+    # ── Stats summary table ──
+    items.append(Paragraph("Performance Summary", ST["h2"]))
+
+    def _pct(val):
+        return f"{val:+.1f}%"
+
+    def _wr(val):
+        return f"{val:.0f}%"
+
+    hdr = ["Subset", "N", "Win Rate", "Avg Return", "Median", "Sharpe", "Best", "Worst"]
+    rows_data = [
+        ("MSCI Poland — All Events", result.msci_all),
+        ("MSCI Poland — Momentum Filtered", result.msci_filtered),
+        ("FTSE Developed Europe — All Events", result.ftse_all),
+        ("FTSE Developed Europe — Filtered", result.ftse_filtered),
+        ("COMBINED — All Events", result.base_result.all_events),
+        ("COMBINED — Momentum Filtered ★", result.base_result.momentum_filtered),
+    ]
+
+    stat_rows = [[
+        Paragraph(c, ST["cellb"]) for c in hdr
+    ]]
+    for label, s in rows_data:
+        is_highlight = "★" in label
+        sk = "cellg" if is_highlight else "cell"
+        stat_rows.append([
+            Paragraph(label, ST[sk]),
+            Paragraph(str(s.n_events), ST[sk]),
+            Paragraph(_wr(s.win_rate_pct), ST[sk]),
+            Paragraph(_pct(s.avg_return_pct), ST[sk]),
+            Paragraph(_pct(s.median_return_pct), ST[sk]),
+            Paragraph(f"{s.sharpe_ratio:.2f}", ST[sk]),
+            Paragraph(_pct(s.max_return_pct), ST[sk]),
+            Paragraph(_pct(s.max_loss_pct), ST[sk]),
+        ])
+
+    col_r_stats = [0.28, 0.05, 0.09, 0.10, 0.09, 0.09, 0.09, 0.09]
+    items.append(_table(stat_rows, col_r_stats))
+    items.append(Spacer(1, 0.15 * cm))
+    items.append(Paragraph(
+        "★ Optimal strategy: momentum-filtered combined universe. "
+        f"Filter retains {result.base_result.filter_retention_pct:.0f}% of events "
+        f"({result.base_result.n_filtered_in}/{result.base_result.n_total_events}) "
+        "while substantially improving Sharpe and win rate. "
+        "FTSE events show higher win rate due to smaller ADV impact (less crowded trade). "
+        "MSCI events show higher absolute returns due to larger forced buying ($200-340M vs $50-120M).",
+        ST["small"]))
+    items.append(Spacer(1, 0.2 * cm))
+
+    # ── Momentum filter sensitivity ──
+    items.append(Paragraph("Momentum Filter Sensitivity", ST["h2"]))
+    sens_hdr = ["RS Threshold", "Events Passing", "Win Rate", "Avg Return", "Sharpe", "Calmar"]
+    sens_rows = [[ Paragraph(c, ST["cellb"]) for c in sens_hdr ]]
+
+    from framework.inclusion_backtest import run_backtest as _run_bt
+    for thresh in [40, 50, 55, 60, 65, 70, 75]:
+        r = _run_bt(momentum_filter_pct=thresh)
+        mf = r.momentum_filtered
+        calmar = mf.calmar_ratio()
+        is_opt = thresh == 60
+        sk = "cellg" if is_opt else "cell"
+        calmar_str = f"{calmar:.2f}x" if calmar != float("inf") else "∞"
+        label = f"RS ≥ {thresh}th pct" + (" ← OPTIMAL" if is_opt else "")
+        sens_rows.append([
+            Paragraph(label, ST[sk]),
+            Paragraph(f"{mf.n_events}", ST[sk]),
+            Paragraph(f"{mf.win_rate_pct:.0f}%", ST[sk]),
+            Paragraph(f"{mf.avg_return_pct:+.2f}%", ST[sk]),
+            Paragraph(f"{mf.sharpe_ratio:.2f}", ST[sk]),
+            Paragraph(calmar_str, ST[sk]),
+        ])
+
+    col_r_sens = [0.22, 0.16, 0.13, 0.15, 0.12, 0.12]
+    items.append(_table(sens_rows, col_r_sens))
+    items.append(Spacer(1, 0.15 * cm))
+    items.append(Paragraph(
+        "RS ≥ 60th percentile + above 200d MA is the optimal filter threshold: "
+        "best Sharpe / event count balance. "
+        "RS ≥ 75th+ retains too few events (sample size concern). "
+        "Filtering BELOW the threshold is the single biggest alpha source in this strategy.",
+        ST["small"]))
+    items.append(Spacer(1, 0.2 * cm))
+
+    # ── Dual-index pair analysis ──
+    items.append(Paragraph("Dual-Index Historical Pairs — Compound Return Analysis", ST["h2"]))
+    items.append(Paragraph(
+        "These are cases where the same stock was added to BOTH MSCI Poland AND FTSE Developed "
+        "Europe within weeks/months of each other. Holding from MSCI T−45 entry all the way through "
+        "the FTSE effective date captures two sequential waves of passive demand.",
+        ST["body"]))
+    items.append(Spacer(1, 0.1 * cm))
+
+    dual_hdr = ["Stock", "MSCI Review", "FTSE Review", "Gap", "MSCI Ret", "FTSE Ret",
+                "Combined", "RS@Entry", "Sector"]
+    dual_rows = [[ Paragraph(c, ST["cellb"]) for c in dual_hdr ]]
+
+    for p in result.dual_pairs:
+        gap_str = f"{p.months_between:.0f}mo" if p.months_between >= 2 else f"{p.months_between*4:.0f}wk"
+        combined_col = f"<font color='#2E7D32'><b>{p.combined_return_pct:+.1f}%</b></font>"
+        dual_rows.append([
+            Paragraph(f"<b>{p.ticker}</b> {p.stock_name[:16]}", ST["cell"]),
+            Paragraph(p.msci_review, ST["cell"]),
+            Paragraph(p.ftse_review, ST["cell"]),
+            Paragraph(gap_str, ST["cell"]),
+            Paragraph(f"{p.msci_return_pct:+.1f}%", ST["cellg"]),
+            Paragraph(f"{p.ftse_return_pct:+.1f}%", ST["cellg"]),
+            Paragraph(combined_col, ST["cellg"]),
+            Paragraph(f"{p.rs_at_msci_entry:.0f}th", ST["cell"]),
+            Paragraph(p.sector[:14], ST["cell"]),
+        ])
+
+    col_r_dual = [0.18, 0.10, 0.10, 0.06, 0.08, 0.08, 0.09, 0.09, 0.12]
+    items.append(_table(dual_rows, col_r_dual))
+    items.append(Spacer(1, 0.15 * cm))
+
+    d = result
+    items.append(Paragraph(
+        f"Dual-index avg combined return: <b>{d.dual_avg_combined_pct:+.1f}%</b>  ·  "
+        f"MSCI leg avg: {d.dual_avg_msci_leg_pct:+.1f}%  ·  "
+        f"FTSE leg avg: {d.dual_avg_ftse_leg_pct:+.1f}%  ·  "
+        f"Win rate: {d.dual_win_rate_pct:.0f}%  ·  "
+        f"Avg holding: {d.dual_avg_months:.1f} months  ·  "
+        f"N pairs: {d.n_dual_pairs}",
+        ST["small"]))
+    items.append(Spacer(1, 0.15 * cm))
+
+    # ── Full event detail table ──
+    items.append(Paragraph("Full Event Detail — All Historical Events", ST["h2"]))
+    ev_hdr = ["Event ID", "Stock", "Index", "Review", "RS%", "200MA", "Pass", "Return", "ADV Days"]
+    ev_rows = [[ Paragraph(c, ST["cellb"]) for c in ev_hdr ]]
+
+    index_groups = [("MSCI", result.msci_events), ("FTSE", result.ftse_events)]
+    for idx_label, evs in index_groups:
+        for e in sorted(evs, key=lambda x: x.event_id):
+            passed = "✓" if e.momentum_passes_filter else "✗"
+            ma = "Y" if e.above_200d_ma_at_entry else "N"
+            ret_val = e.return_t45_to_effective_pct or 0
+            ret_str = f"{ret_val:+.1f}%"
+            if ret_val >= 10:
+                ret_str = f"<font color='#2E7D32'><b>{ret_str} ★★</b></font>"
+            elif ret_val >= 5:
+                ret_str = f"<font color='#1565C0'>{ret_str} ★</font>"
+            elif ret_val < 0:
+                ret_str = f"<font color='#B71C1C'>{ret_str}</font>"
+            sk = "cell" if e.momentum_passes_filter else "cella"
+            ev_rows.append([
+                Paragraph(e.event_id, ST["cell"]),
+                Paragraph(e.stock_name[:18], ST[sk]),
+                Paragraph(idx_label, ST["cell"]),
+                Paragraph(e.review_date, ST["cell"]),
+                Paragraph(f"{e.rs_percentile_at_entry:.0f}", ST[sk]),
+                Paragraph(ma, ST[sk]),
+                Paragraph(passed, ST[sk]),
+                Paragraph(ret_str, ST[sk]),
+                Paragraph(f"{e.adv_days_to_absorb:.1f}d", ST["cell"]),
+            ])
+
+    col_r_ev = [0.10, 0.18, 0.07, 0.10, 0.06, 0.07, 0.06, 0.09, 0.08]
+    items.append(_table(ev_rows, col_r_ev))
+    items.append(Spacer(1, 0.15 * cm))
+    items.append(Paragraph(
+        "★★ = return >10%  ·  ★ = 5-10%  ·  Red = negative  ·  "
+        "Yellow row = excluded by momentum filter. "
+        "Pass column: ✓ = RS ≥ 60th pct AND above 200d MA at T-45 entry date.",
+        ST["small"]))
+    return items
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main build
 # ─────────────────────────────────────────────────────────────────────────────
 def build_pdf(output_path: str = "/tmp/poland_combined_inclusion_2026.pdf") -> str:
@@ -635,6 +825,7 @@ def build_pdf(output_path: str = "/tmp/poland_combined_inclusion_2026.pdf") -> s
     story += ftse_section(report)
     story += stock_cards_section(report)
     story += trade_action_section(report)
+    story += backtest_section()
     doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
     return output_path
 

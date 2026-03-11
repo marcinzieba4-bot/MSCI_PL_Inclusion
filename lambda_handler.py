@@ -90,10 +90,14 @@ def _generate_pdfs() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _generate_json() -> dict:
-    """Build the combined report data model and save as JSON to /tmp."""
+    """Build the combined report data model + backtest and save as JSON to /tmp."""
     from examples.combined_report_2026 import build_combined_report
+    from examples.backtest_combined_2026 import build_combined_backtest, to_json_dict as backtest_to_json
     report = build_combined_report()
     data = report.to_json_dict()
+    # Attach backtest results
+    bt_result = build_combined_backtest()
+    data["backtest"] = backtest_to_json(bt_result)
     with open(_JSON_TMP_PATH, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, ensure_ascii=False)
     log.info("JSON saved to %s (%d bytes)", _JSON_TMP_PATH, os.path.getsize(_JSON_TMP_PATH))
