@@ -1,9 +1,12 @@
 """
 AWS Lambda handler — MSCI + FTSE Poland Inclusion Report (Combined)
 ====================================================================
-Generates three PDFs (MSCI-only, MSCI candidates watchlist, combined MSCI+FTSE)
-and a JSON summary, saves them all to S3 (s3bucketmz/Strategies/), then
-emails the PDFs via SES.
+Generates four PDFs (MSCI-only, MSCI candidates watchlist, combined MSCI+FTSE,
+backtest 2018-2026) and a JSON summary, saves them all to S3, then emails the
+PDFs via SES.
+
+  PDFs  → s3bucketmz/Strategies/
+  JSONs → s3bucketmz/Strategies/json/
 
 Environment variables (set in Lambda config):
   SENDER_EMAIL      - verified SES sender address
@@ -61,13 +64,20 @@ REPORTS = [
         "filename": "poland_combined_inclusion_2026.pdf",
         "s3_key":   f"{S3_PREFIX}/poland_combined_inclusion_2026_{_TODAY}.pdf",
     },
+    {
+        "module":   "examples.generate_backtest_pdf",
+        "function": "build_pdf",
+        "out_path": "/tmp/poland_backtest_combined_2026.pdf",
+        "filename": "poland_backtest_combined_2026.pdf",
+        "s3_key":   f"{S3_PREFIX}/poland_backtest_combined_2026_{_TODAY}.pdf",
+    },
 ]
 
 _JSON_TMP_PATH     = "/tmp/poland_inclusion_2026_summary.json"
-_JSON_S3_KEY       = f"{S3_PREFIX}/poland_inclusion_2026_summary_{_TODAY}.json"
+_JSON_S3_KEY       = f"{S3_PREFIX}/json/poland_inclusion_2026_summary_{_TODAY}.json"
 
-_BACKTEST_TMP_PATH = "/tmp/poland_backtest_combined_2026.json"
-_BACKTEST_S3_KEY   = f"{S3_PREFIX}/poland_backtest_combined_2026_{_TODAY}.json"
+_BACKTEST_JSON_TMP_PATH = "/tmp/poland_backtest_combined_2026.json"
+_BACKTEST_JSON_S3_KEY   = f"{S3_PREFIX}/json/poland_backtest_combined_2026_{_TODAY}.json"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,10 +118,10 @@ def _generate_backtest_json() -> dict:
     from examples.backtest_combined_2026 import build_combined_backtest, to_json_dict as bt_to_json
     bt_result = build_combined_backtest()
     data = bt_to_json(bt_result)
-    with open(_BACKTEST_TMP_PATH, "w", encoding="utf-8") as fh:
+    with open(_BACKTEST_JSON_TMP_PATH, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2, ensure_ascii=False)
-    log.info("Backtest JSON saved to %s (%d bytes)", _BACKTEST_TMP_PATH,
-             os.path.getsize(_BACKTEST_TMP_PATH))
+    log.info("Backtest JSON saved to %s (%d bytes)",
+             _BACKTEST_JSON_TMP_PATH, os.path.getsize(_BACKTEST_JSON_TMP_PATH))
     return data
 
 
@@ -140,9 +150,9 @@ def _save_all_to_s3(pdfs: list[dict]) -> dict:
         uri = _upload_to_s3(pdf["path"], pdf["s3_key"], "application/pdf")
         uploaded[pdf["filename"]] = uri
     json_uri = _upload_to_s3(_JSON_TMP_PATH, _JSON_S3_KEY, "application/json")
-    uploaded["poland_inclusion_2026_summary.json"] = json_uri
-    bt_uri = _upload_to_s3(_BACKTEST_TMP_PATH, _BACKTEST_S3_KEY, "application/json")
-    uploaded["poland_backtest_combined_2026.json"] = bt_uri
+    uploaded["json/poland_inclusion_2026_summary.json"] = json_uri
+    bt_uri = _upload_to_s3(_BACKTEST_JSON_TMP_PATH, _BACKTEST_JSON_S3_KEY, "application/json")
+    uploaded["json/poland_backtest_combined_2026.json"] = bt_uri
     return uploaded
 
 
@@ -165,9 +175,12 @@ def _build_email(pdfs: list[dict], json_data: dict, s3_uris: dict) -> bytes:
         "  1. poland_combined_inclusion_2026.pdf\n"
         "     → Combined MSCI + FTSE report with dual-index plays, individual views,\n"
         "       and full trade action list.\n\n"
-        "  2. msci_poland_march_2026_update.pdf\n"
+        "  2. poland_backtest_combined_2026.pdf\n"
+        "     → Combined MSCI + FTSE backtest 2018–2026: performance by index family,\n"
+        "       momentum filter sensitivity, dual-index pair analysis, event detail.\n\n"
+        "  3. msci_poland_march_2026_update.pdf\n"
         "     → MSCI-only March 2026 update (Feb 2026 SAR outcome + live market data).\n\n"
-        "  3. msci_poland_2026_candidates.pdf\n"
+        "  4. msci_poland_2026_candidates.pdf\n"
         "     → Full MSCI Poland 2026 candidate watchlist with threshold mechanics.\n\n"
         "COMBINED REPORT SUMMARY:\n"
         f"  Total trades:            {d.get('total_trades', '—')}\n"
@@ -200,26 +213,6 @@ def _build_email(pdfs: list[dict], json_data: dict, s3_uris: dict) -> bytes:
         encoders.encode_base64(part)
         part.add_header("Content-Disposition", "attachment", filename=pdf["filename"])
         msg.attach(part)
-
-    # Attach combined report JSON
-    with open(_JSON_TMP_PATH, "rb") as f:
-        json_bytes = f.read()
-    json_part = MIMEBase("application", "json")
-    json_part.set_payload(json_bytes)
-    encoders.encode_base64(json_part)
-    json_part.add_header("Content-Disposition", "attachment",
-                         filename="poland_inclusion_2026_summary.json")
-    msg.attach(json_part)
-
-    # Attach backtest JSON
-    with open(_BACKTEST_TMP_PATH, "rb") as f:
-        bt_bytes = f.read()
-    bt_part = MIMEBase("application", "json")
-    bt_part.set_payload(bt_bytes)
-    encoders.encode_base64(bt_part)
-    bt_part.add_header("Content-Disposition", "attachment",
-                       filename="poland_backtest_combined_2026.json")
-    msg.attach(bt_part)
 
     return msg.as_bytes()
 
@@ -267,7 +260,7 @@ def handler(event, context):
     """
     Lambda entry point.
 
-    event={}                        → generate PDFs + JSON, save to S3, email them
+    event={}                        → generate 4 PDFs + 2 JSONs, save to S3, email PDFs
     event={"action":"verify"}       → send SES verification emails
     event={"action":"s3_only"}      → generate + save to S3, no email
     event={"action":"json_only"}    → generate JSON only, save to S3
@@ -290,7 +283,7 @@ def handler(event, context):
             json_data = _generate_json()
             bt_data   = _generate_backtest_json()
             json_uri  = _upload_to_s3(_JSON_TMP_PATH, _JSON_S3_KEY, "application/json")
-            bt_uri    = _upload_to_s3(_BACKTEST_TMP_PATH, _BACKTEST_S3_KEY, "application/json")
+            bt_uri    = _upload_to_s3(_BACKTEST_JSON_TMP_PATH, _BACKTEST_JSON_S3_KEY, "application/json")
             return {
                 "statusCode": 200,
                 "body": json.dumps({
@@ -309,7 +302,8 @@ def handler(event, context):
 
         # Save to S3
         s3_uris = _save_all_to_s3(pdfs)
-        log.info("All files saved to S3 bucket '%s' under prefix '%s'", S3_BUCKET, S3_PREFIX)
+        log.info("All files saved to S3 bucket '%s' (PDFs: %s/  JSONs: %s/json/)",
+                 S3_BUCKET, S3_PREFIX, S3_PREFIX)
 
         if action == "s3_only":
             return {
