@@ -89,10 +89,10 @@ ANTHROPIC_API_KEY  = os.environ.get('ANTHROPIC_API_KEY', '')
 REGION             = os.environ.get('AWS_REGION', 'eu-north-1')
 DEPLOY_ID          = os.environ.get('DEPLOY_ID', '')
 
-POLL_INTERVAL_S    = 60       # seconds between polls in normal mode
-BUSY_WAIT_S        = 300      # seconds to pause after triggering a report
-CYCLES_PER_RUN     = 12       # ~12 min per Lambda invocation
-MAX_AGE_SECONDS    = 180      # ignore messages older than 3 min
+POLL_INTERVAL_S    = 5        # seconds between polls in normal mode
+BUSY_WAIT_S        = 30       # seconds to pause after triggering a report
+CYCLES_PER_RUN     = 140      # ~12 min per Lambda invocation (140 × 5s)
+MAX_AGE_SECONDS    = 600      # ignore messages older than 10 min
 REINVOKE_BUFFER_MS = 90_000   # bail out when less than 90 s remains
 
 
