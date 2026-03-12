@@ -28,9 +28,10 @@ if aws lambda get-function --function-name "$FUNCTION" --region "$REGION" > /dev
   echo "==> Waiting for update to complete..."
   aws lambda wait function-updated --function-name "$FUNCTION" --region "$REGION"
 
-  echo "==> Setting environment variables..."
+  echo "==> Setting environment variables and role..."
   aws lambda update-function-configuration \
     --function-name "$FUNCTION" \
+    --role "$ROLE" \
     --environment "$ENV_VARS" \
     --timeout 900 \
     --region "$REGION"
