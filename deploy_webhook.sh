@@ -51,6 +51,12 @@ fi
 echo "==> Waiting for function to be active..."
 aws lambda wait function-active --function-name "$FUNCTION" --region "$REGION"
 
+echo "==> Setting reserved concurrency to 1 (prevents duplicate polling chains)..."
+aws lambda put-function-concurrency \
+  --function-name "$FUNCTION" \
+  --reserved-concurrent-executions 1 \
+  --region "$REGION"
+
 echo "==> Invoking Lambda to start polling..."
 aws lambda invoke \
   --function-name "$FUNCTION" \
