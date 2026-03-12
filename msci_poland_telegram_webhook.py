@@ -183,12 +183,32 @@ def _ddg_search(query, max_results=5):
     return '\n\n'.join(parts)
 
 
+def _extract_ticker(user_text):
+    """Ask Claude Haiku to extract the stock name/ticker from a free-text query."""
+    try:
+        r = _anthropic_post({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 16,
+            'messages': [{'role': 'user', 'content': (
+                'Extract only the company name or stock ticker symbol from this query. '
+                'Reply with just the name or ticker, nothing else.\n' + user_text
+            )}],
+        }, timeout=15)
+        for block in r.get('content', []):
+            if block.get('type') == 'text':
+                return block['text'].strip()
+    except Exception as e:
+        logger.warning('Ticker extraction failed: %s', e)
+    return user_text
+
+
 def _yahoo_price(query):
     """Search Yahoo Finance for a ticker matching the query and return live price."""
     import urllib.parse
-    # Step 1: find the ticker symbol
+    # Step 1: extract short ticker/name then find the symbol
+    search_term = _extract_ticker(query)
     search_url = 'https://query2.finance.yahoo.com/v1/finance/search?' + urllib.parse.urlencode({
-        'q': query, 'lang': 'en-US', 'region': 'US', 'newsCount': '0',
+        'q': search_term, 'lang': 'en-US', 'region': 'US', 'newsCount': '0',
     })
     try:
         req  = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
