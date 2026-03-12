@@ -183,23 +183,67 @@ def _ddg_search(query, max_results=5):
     return '\n\n'.join(parts)
 
 
+def _yahoo_price(query):
+    """Search Yahoo Finance for a ticker matching the query and return live price."""
+    import urllib.parse
+    # Step 1: find the ticker symbol
+    search_url = 'https://query2.finance.yahoo.com/v1/finance/search?' + urllib.parse.urlencode({
+        'q': query, 'lang': 'en-US', 'region': 'US', 'newsCount': '0',
+    })
+    try:
+        req  = urllib.request.Request(search_url, headers={'User-Agent': 'Mozilla/5.0'})
+        data = json.loads(urllib.request.urlopen(req, timeout=10).read())
+        quotes = data.get('quotes', [])
+        if not quotes:
+            return ''
+        symbol = quotes[0]['symbol']
+    except Exception as e:
+        logger.warning('Yahoo search failed: %s', e)
+        return ''
+
+    # Step 2: fetch the price
+    try:
+        price_url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
+        req2 = urllib.request.Request(price_url, headers={'User-Agent': 'Mozilla/5.0'})
+        pdata = json.loads(urllib.request.urlopen(req2, timeout=10).read())
+        meta  = pdata['chart']['result'][0]['meta']
+        price = meta.get('regularMarketPrice')
+        prev  = meta.get('chartPreviousClose') or meta.get('previousClose')
+        ccy   = meta.get('currency', '')
+        name  = meta.get('longName') or meta.get('shortName') or symbol
+        if price is None:
+            return ''
+        change = ''
+        if prev:
+            pct    = (price - prev) / prev * 100
+            sign   = '+' if pct >= 0 else ''
+            change = f' ({sign}{pct:.2f}%)'
+        return f'{name} [{symbol}]: {price} {ccy}{change}'
+    except Exception as e:
+        logger.warning('Yahoo price fetch failed: %s', e)
+        return ''
+
+
 def _answer_with_search(user_text):
-    """Search the web then ask Claude Sonnet to answer using the results."""
-    search_results = _ddg_search(user_text)
-    context = (
-        f'Web search results for "{user_text}":\n\n{search_results}\n\n'
-        if search_results
-        else 'No web search results found.\n\n'
-    )
+    """Fetch live price + DDG snippets, then ask Claude Sonnet to answer."""
+    yahoo   = _yahoo_price(user_text)
+    ddg     = _ddg_search(user_text)
+
+    parts = []
+    if yahoo:
+        parts.append(f'Live market data:\n{yahoo}')
+    if ddg:
+        parts.append(f'Web search results:\n{ddg}')
+    context = ('\n\n'.join(parts) + '\n\n') if parts else 'No external data available.\n\n'
+
     result = _anthropic_post({
         'model': 'claude-sonnet-4-6',
-        'max_tokens': 1024,
+        'max_tokens': 512,
         'system': (
             'You are a financial research assistant specialising in Polish equities '
             'and index inclusion (MSCI Poland, FTSE Poland). '
-            'Answer the user\'s question using the web search context provided. '
-            'If the context contains relevant data, cite it. '
-            'Be concise. Use plain text only — no Markdown.'
+            'Answer the user question using the data provided above. '
+            'State the price and change if available. Be concise. Plain text only, no Markdown.'
         ),
         'messages': [{'role': 'user', 'content': context + user_text}],
     }, timeout=60)
