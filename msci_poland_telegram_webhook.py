@@ -112,7 +112,12 @@ def tg_post(method, payload):
     return json.loads(resp.read())
 
 
+_TG_MAX_CHARS = 4000  # Telegram hard limit is 4096; stay safely under it
+
+
 def send_message(chat_id, text):
+    if len(text) > _TG_MAX_CHARS:
+        text = text[:_TG_MAX_CHARS] + '\n\n…(truncated)'
     try:
         tg_post('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'})
     except Exception:
@@ -150,6 +155,60 @@ def _anthropic_post(body, timeout=60):
     return json.loads(resp.read())
 
 
+def _ddg_search(query, max_results=5):
+    """Search DuckDuckGo and return text snippets (no API key needed)."""
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        'q': query, 'format': 'json', 'no_html': '1', 'skip_disambig': '1',
+    })
+    req = urllib.request.Request(
+        f'https://api.duckduckgo.com/?{params}',
+        headers={'User-Agent': 'Mozilla/5.0'},
+    )
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+    except Exception as e:
+        logger.warning('DDG search failed: %s', e)
+        return ''
+
+    parts = []
+    if data.get('Answer'):
+        parts.append(data['Answer'])
+    if data.get('AbstractText'):
+        parts.append(data['AbstractText'])
+    for topic in data.get('RelatedTopics', [])[:max_results]:
+        if isinstance(topic, dict) and topic.get('Text'):
+            parts.append(topic['Text'])
+    return '\n\n'.join(parts)
+
+
+def _answer_with_search(user_text):
+    """Search the web then ask Claude Sonnet to answer using the results."""
+    search_results = _ddg_search(user_text)
+    context = (
+        f'Web search results for "{user_text}":\n\n{search_results}\n\n'
+        if search_results
+        else 'No web search results found.\n\n'
+    )
+    result = _anthropic_post({
+        'model': 'claude-sonnet-4-6',
+        'max_tokens': 1024,
+        'system': (
+            'You are a financial research assistant specialising in Polish equities '
+            'and index inclusion (MSCI Poland, FTSE Poland). '
+            'Answer the user\'s question using the web search context provided. '
+            'If the context contains relevant data, cite it. '
+            'Be concise. Use plain text only — no Markdown.'
+        ),
+        'messages': [{'role': 'user', 'content': context + user_text}],
+    }, timeout=60)
+    for block in result.get('content', []):
+        if block.get('type') == 'text' and block['text'].strip():
+            return block['text'].strip()
+    return "I couldn't find a good answer to that."
+
+
 _SYSTEM_CLASSIFY = (
     'You control a Telegram bot that manages Poland index inclusion research reports. '
     'The report covers MSCI Poland Standard (Emerging Market) additions and FTSE Developed '
@@ -168,11 +227,10 @@ _SYSTEM_CLASSIFY = (
 
 
 def classify_intent(user_text):
-    """Ask Claude Sonnet to classify the user's intent and pick an action.
+    """Use Claude Haiku to route the message to run_report / reply / modify_code.
 
-    Claude may call web_search_20250305 (server-side, handled by Anthropic)
-    before deciding on a final action.  The agentic loop continues until the
-    model either calls one of the dispatch tools or produces a text answer.
+    For 'reply' the payload is intentionally empty — handle_message calls
+    _answer_with_search() to produce the actual answer.
 
     Returns ('run_report'|'reply'|'modify_code', payload_str).
     """
@@ -187,14 +245,8 @@ def classify_intent(user_text):
         },
         {
             'name': 'reply',
-            'description': 'Answer the user with a text message.',
-            'input_schema': {
-                'type': 'object',
-                'properties': {
-                    'text': {'type': 'string', 'description': 'Reply text (Markdown OK).'},
-                },
-                'required': ['text'],
-            },
+            'description': 'Any question or conversation that should be answered.',
+            'input_schema': {'type': 'object', 'properties': {}, 'required': []},
         },
         {
             'name': 'modify_code',
@@ -214,61 +266,29 @@ def classify_intent(user_text):
                 'required': ['summary'],
             },
         },
-        # Built-in Anthropic web search tool — server-side, no client execution needed.
-        {'type': 'web_search_20250305', 'name': 'web_search'},
     ]
 
-    messages = [{'role': 'user', 'content': user_text}]
+    result = _anthropic_post({
+        'model': 'claude-haiku-4-5-20251001',
+        'max_tokens': 64,
+        'system': _SYSTEM_CLASSIFY,
+        'messages': [{'role': 'user', 'content': user_text}],
+        'tools': tools,
+        'tool_choice': {'type': 'auto'},
+    }, timeout=30)
 
-    for _turn in range(6):  # at most 5 search rounds then a final answer
-        result = _anthropic_post({
-            'model': 'claude-sonnet-4-6',
-            'max_tokens': 1024,
-            'system': _SYSTEM_CLASSIFY,
-            'messages': messages,
-            'tools': tools,
-            'tool_choice': {'type': 'auto'},
-        }, timeout=90)
+    for block in result.get('content', []):
+        if block.get('type') == 'tool_use':
+            name = block['name']
+            inp  = block.get('input', {})
+            if name == 'run_report':
+                return 'run_report', ''
+            if name == 'reply':
+                return 'reply', ''
+            if name == 'modify_code':
+                return 'modify_code', inp.get('summary', 'Code change')
 
-        content     = result.get('content', [])
-        stop_reason = result.get('stop_reason', 'end_turn')
-
-        # Check for our dispatch tool calls first.
-        for block in content:
-            if block.get('type') == 'tool_use':
-                name = block['name']
-                inp  = block.get('input', {})
-                if name == 'run_report':
-                    return 'run_report', ''
-                if name == 'reply':
-                    return 'reply', inp.get('text', '')
-                if name == 'modify_code':
-                    return 'modify_code', inp.get('summary', 'Code change')
-
-        # If the model produced a plain text answer, use it.
-        if stop_reason == 'end_turn':
-            for block in content:
-                if block.get('type') == 'text' and block['text'].strip():
-                    return 'reply', block['text'].strip()
-            break
-
-        # stop_reason == 'tool_use' for web_search (server-side).
-        # Append assistant turn and empty tool_result so the loop continues.
-        if stop_reason == 'tool_use':
-            messages.append({'role': 'assistant', 'content': content})
-            tool_results = [
-                {'type': 'tool_result', 'tool_use_id': b['id'], 'content': ''}
-                for b in content
-                if b.get('type') == 'tool_use' and b.get('name') == 'web_search'
-            ]
-            if tool_results:
-                messages.append({'role': 'user', 'content': tool_results})
-            else:
-                break  # unexpected tool_use without web_search blocks — stop
-        else:
-            break
-
-    return 'reply', "I'm not sure how to help with that."
+    return 'reply', ''
 
 
 # ── Report Lambda code helpers ─────────────────────────────────────────────────
@@ -394,9 +414,14 @@ def handle_message(text, chat_id, lam_client):
     # ── reply ──────────────────────────────────────────────────────────────────
     if action == 'reply':
         try:
-            send_message(chat_id, payload_str or '\U0001f914')
+            answer = _answer_with_search(text)
+            send_message(chat_id, answer)
         except Exception as e:
-            logger.error("send_message (reply) failed: %s", e)
+            logger.error("reply failed: %s", e)
+            try:
+                send_message(chat_id, f'Error generating answer: {e}')
+            except Exception:
+                pass
         return False
 
     # ── modify_code ────────────────────────────────────────────────────────────
