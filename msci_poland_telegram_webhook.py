@@ -1,11 +1,13 @@
 """
 MSCI Poland Inclusion Report — Telegram Polling Agent
 ======================================================
-Polls Telegram every 60 s, passes each message to Claude (Anthropic API)
+Polls Telegram every 5 s, passes each message to Claude (Anthropic API)
 for interpretation, and dispatches one of:
 
   • run_report   — invoke msci-poland-inclusion-report Lambda (PDFs + email)
   • reply        — send Claude's plain-text answer back to the user
+                   (Claude may call web_search_20250305 first to look up
+                    current prices, index data, or news before answering)
   • modify_code  — fetch lambda_handler.py from the report Lambda, apply the
                    requested change, and redeploy (no approval needed)
 
@@ -153,12 +155,20 @@ _SYSTEM_CLASSIFY = (
     'Use "run_report" when the user wants to trigger report generation. '
     'Use "modify_code" when the user wants to change what the report contains, its data, '
     'formatting, candidates, thresholds, or backtest parameters. '
-    'For any other question or conversation, use "reply" with a helpful answer.'
+    'For any other question or conversation, use "reply" with a helpful answer. '
+    'You have access to web_search — use it whenever the question may benefit from '
+    'current market data, recent news, live index compositions, free-float figures, '
+    'stock prices, or any information that may have changed since your training cutoff. '
+    'Search first, then reply.'
 )
 
 
 def classify_intent(user_text):
-    """Ask Claude Haiku to classify the user's intent and pick an action.
+    """Ask Claude Sonnet to classify the user's intent and pick an action.
+
+    Claude may call web_search_20250305 (server-side, handled by Anthropic)
+    before deciding on a final action.  The agentic loop continues until the
+    model either calls one of the dispatch tools or produces a text answer.
 
     Returns ('run_report'|'reply'|'modify_code', payload_str).
     """
@@ -173,7 +183,7 @@ def classify_intent(user_text):
         },
         {
             'name': 'reply',
-            'description': 'Answer the user with a short text message.',
+            'description': 'Answer the user with a text message.',
             'input_schema': {
                 'type': 'object',
                 'properties': {
@@ -200,29 +210,59 @@ def classify_intent(user_text):
                 'required': ['summary'],
             },
         },
+        # Built-in Anthropic web search tool — server-side, no client execution needed.
+        {'type': 'web_search_20250305', 'name': 'web_search'},
     ]
 
-    result = _anthropic_post({
-        'model': 'claude-haiku-4-5-20251001',
-        'max_tokens': 256,
-        'system': _SYSTEM_CLASSIFY,
-        'messages': [{'role': 'user', 'content': user_text}],
-        'tools': tools,
-        'tool_choice': {'type': 'auto'},
-    })
+    messages = [{'role': 'user', 'content': user_text}]
 
-    for block in result.get('content', []):
-        if block.get('type') == 'tool_use':
-            name = block['name']
-            inp  = block.get('input', {})
-            if name == 'run_report':
-                return 'run_report', ''
-            if name == 'reply':
-                return 'reply', inp.get('text', '')
-            if name == 'modify_code':
-                return 'modify_code', inp.get('summary', 'Code change')
-        if block.get('type') == 'text':
-            return 'reply', block['text']
+    for _turn in range(6):  # at most 5 search rounds then a final answer
+        result = _anthropic_post({
+            'model': 'claude-sonnet-4-6',
+            'max_tokens': 1024,
+            'system': _SYSTEM_CLASSIFY,
+            'messages': messages,
+            'tools': tools,
+            'tool_choice': {'type': 'auto'},
+        }, timeout=60)
+
+        content     = result.get('content', [])
+        stop_reason = result.get('stop_reason', 'end_turn')
+
+        # Check for our dispatch tool calls first.
+        for block in content:
+            if block.get('type') == 'tool_use':
+                name = block['name']
+                inp  = block.get('input', {})
+                if name == 'run_report':
+                    return 'run_report', ''
+                if name == 'reply':
+                    return 'reply', inp.get('text', '')
+                if name == 'modify_code':
+                    return 'modify_code', inp.get('summary', 'Code change')
+
+        # If the model produced a plain text answer, use it.
+        if stop_reason == 'end_turn':
+            for block in content:
+                if block.get('type') == 'text' and block['text'].strip():
+                    return 'reply', block['text'].strip()
+            break
+
+        # stop_reason == 'tool_use' for web_search (server-side).
+        # Append assistant turn and empty tool_result so the loop continues.
+        if stop_reason == 'tool_use':
+            messages.append({'role': 'assistant', 'content': content})
+            tool_results = [
+                {'type': 'tool_result', 'tool_use_id': b['id'], 'content': ''}
+                for b in content
+                if b.get('type') == 'tool_use' and b.get('name') == 'web_search'
+            ]
+            if tool_results:
+                messages.append({'role': 'user', 'content': tool_results})
+            else:
+                break  # unexpected tool_use without web_search blocks — stop
+        else:
+            break
 
     return 'reply', "I'm not sure how to help with that."
 
