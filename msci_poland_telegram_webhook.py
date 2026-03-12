@@ -113,7 +113,11 @@ def tg_post(method, payload):
 
 
 def send_message(chat_id, text):
-    tg_post('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'})
+    try:
+        tg_post('sendMessage', {'chat_id': chat_id, 'text': text, 'parse_mode': 'Markdown'})
+    except Exception:
+        # Telegram rejects messages with malformed Markdown — retry as plain text.
+        tg_post('sendMessage', {'chat_id': chat_id, 'text': text})
 
 
 def get_fresh_offset():
@@ -224,7 +228,7 @@ def classify_intent(user_text):
             'messages': messages,
             'tools': tools,
             'tool_choice': {'type': 'auto'},
-        }, timeout=60)
+        }, timeout=90)
 
         content     = result.get('content', [])
         stop_reason = result.get('stop_reason', 'end_turn')

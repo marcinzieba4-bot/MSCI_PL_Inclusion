@@ -10,7 +10,7 @@ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-8521910826:AAHbOLnsWFGRBNFWHWbrxJ9Puyg
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-7366508056}"
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY env var before running}"
 REPORT_LAMBDA="msci-poland-inclusion-report"
-DEPLOY_ID="v3"
+DEPLOY_ID="v4"
 
 echo "==> Building zip..."
 zip -j /tmp/webhook_deploy.zip msci_poland_telegram_webhook.py
