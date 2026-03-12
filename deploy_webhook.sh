@@ -10,7 +10,7 @@ TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-8521910826:AAHbOLnsWFGRBNFWHWbrxJ9Puyg
 TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-7366508056}"
 ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:?Set ANTHROPIC_API_KEY env var before running}"
 REPORT_LAMBDA="msci-poland-inclusion-report"
-DEPLOY_ID="v8"
+DEPLOY_ID="v9"
 
 echo "==> Building zip..."
 zip -j /tmp/webhook_deploy.zip msci_poland_telegram_webhook.py
@@ -34,6 +34,7 @@ if aws lambda get-function --function-name "$FUNCTION" --region "$REGION" > /dev
     --role "$ROLE" \
     --environment "$ENV_VARS" \
     --timeout 900 \
+    --memory-size 256 \
     --region "$REGION"
 else
   echo "==> Creating Lambda function..."

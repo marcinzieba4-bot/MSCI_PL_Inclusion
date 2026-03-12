@@ -180,7 +180,9 @@ def _ddg_search(query, max_results=5):
     for topic in data.get('RelatedTopics', [])[:max_results]:
         if isinstance(topic, dict) and topic.get('Text'):
             parts.append(topic['Text'])
-    return '\n\n'.join(parts)
+    result = '\n\n'.join(parts)
+    logger.info('DDG search for %r → %d chars', query[:50], len(result))
+    return result
 
 
 def _extract_ticker(user_text):
@@ -196,17 +198,65 @@ def _extract_ticker(user_text):
         }, timeout=15)
         for block in r.get('content', []):
             if block.get('type') == 'text':
-                return block['text'].strip()
+                extracted = block['text'].strip()
+                logger.info('Extracted ticker: %r from %r', extracted, user_text[:60])
+                return extracted
     except Exception as e:
         logger.warning('Ticker extraction failed: %s', e)
     return user_text
 
 
-def _yahoo_price(query):
-    """Search Yahoo Finance for a ticker matching the query and return live price."""
+def _stooq_price(ticker_hint):
+    """Fetch current price from Stooq for Polish/European stocks.
+
+    ticker_hint can be a symbol like XTB, KRUK, XTB.WA, or a company name.
+    Tries <hint>.pl (Warsaw) first, then <hint>.us, then bare <hint>.
+    """
     import urllib.parse
-    # Step 1: extract short ticker/name then find the symbol
-    search_term = _extract_ticker(query)
+    # Normalise: strip exchange suffix, lowercase
+    base = ticker_hint.lower().split('.')[0].strip()
+    candidates = [f'{base}.pl', f'{base}.us', base]
+
+    for sym in candidates:
+        url = f'https://stooq.com/q/l/?s={urllib.parse.quote(sym)}&f=sd2t2ohlcv&h&e=csv'
+        try:
+            req  = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            text = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').strip()
+            lines = [l for l in text.split('\n') if l.strip()]
+            if len(lines) < 2:
+                continue
+            header = lines[0].split(',')
+            row    = dict(zip(header, lines[1].split(',')))
+            close  = row.get('Close', '')
+            if not close or close in ('N/D', 'null', ''):
+                logger.info('Stooq %s → no data', sym)
+                continue
+            date  = row.get('Date', '')
+            open_ = row.get('Open', '')
+            prev_close = row.get('Open', '')  # use open as rough proxy if no prev_close
+            # compute change if we have open
+            change = ''
+            try:
+                c = float(close)
+                o = float(open_)
+                if o:
+                    pct  = (c - o) / o * 100
+                    sign = '+' if pct >= 0 else ''
+                    change = f' ({sign}{pct:.2f}% vs open)'
+            except Exception:
+                pass
+            result = f'{sym.upper()}: {close} PLN{change} (as of {date})'
+            logger.info('Stooq %s → %s', sym, result)
+            return result
+        except Exception as e:
+            logger.warning('Stooq fetch failed for %s: %s', sym, e)
+
+    return ''
+
+
+def _yahoo_price(search_term):
+    """Search Yahoo Finance for a ticker and return live price string."""
+    import urllib.parse
     search_url = 'https://query2.finance.yahoo.com/v1/finance/search?' + urllib.parse.urlencode({
         'q': search_term, 'lang': 'en-US', 'region': 'US', 'newsCount': '0',
     })
@@ -215,16 +265,17 @@ def _yahoo_price(query):
         data = json.loads(urllib.request.urlopen(req, timeout=10).read())
         quotes = data.get('quotes', [])
         if not quotes:
+            logger.info('Yahoo search for %r → 0 quotes', search_term)
             return ''
         symbol = quotes[0]['symbol']
+        logger.info('Yahoo search for %r → symbol %s', search_term, symbol)
     except Exception as e:
         logger.warning('Yahoo search failed: %s', e)
         return ''
 
-    # Step 2: fetch the price
     try:
         price_url = f'https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d'
-        req2 = urllib.request.Request(price_url, headers={'User-Agent': 'Mozilla/5.0'})
+        req2  = urllib.request.Request(price_url, headers={'User-Agent': 'Mozilla/5.0'})
         pdata = json.loads(urllib.request.urlopen(req2, timeout=10).read())
         meta  = pdata['chart']['result'][0]['meta']
         price = meta.get('regularMarketPrice')
@@ -232,38 +283,73 @@ def _yahoo_price(query):
         ccy   = meta.get('currency', '')
         name  = meta.get('longName') or meta.get('shortName') or symbol
         if price is None:
+            logger.info('Yahoo chart for %s → price=None', symbol)
             return ''
         change = ''
         if prev:
             pct    = (price - prev) / prev * 100
             sign   = '+' if pct >= 0 else ''
             change = f' ({sign}{pct:.2f}%)'
-        return f'{name} [{symbol}]: {price} {ccy}{change}'
+        result = f'{name} [{symbol}]: {price} {ccy}{change}'
+        logger.info('Yahoo price: %s', result)
+        return result
     except Exception as e:
         logger.warning('Yahoo price fetch failed: %s', e)
         return ''
 
 
+def _get_market_data(user_text):
+    """Try Yahoo Finance then Stooq to get live price data."""
+    ticker = _extract_ticker(user_text)
+
+    # Try Yahoo first
+    yahoo = _yahoo_price(ticker)
+    if yahoo:
+        return yahoo
+
+    # Fall back to Stooq (better for Polish stocks)
+    logger.info('Yahoo returned nothing for %r — trying Stooq', ticker)
+    stooq = _stooq_price(ticker)
+    if stooq:
+        return stooq
+
+    logger.info('No price data found for %r (tried Yahoo + Stooq)', ticker)
+    return ''
+
+
 def _answer_with_search(user_text):
     """Fetch live price + DDG snippets, then ask Claude Sonnet to answer."""
-    yahoo   = _yahoo_price(user_text)
+    market  = _get_market_data(user_text)
     ddg     = _ddg_search(user_text)
 
     parts = []
-    if yahoo:
-        parts.append(f'Live market data:\n{yahoo}')
+    if market:
+        parts.append(f'Live market data:\n{market}')
     if ddg:
         parts.append(f'Web search results:\n{ddg}')
-    context = ('\n\n'.join(parts) + '\n\n') if parts else 'No external data available.\n\n'
 
+    if parts:
+        context = '\n\n'.join(parts) + '\n\n'
+        data_note = 'Use the live data provided above to answer.'
+    else:
+        context = ''
+        data_note = (
+            'Live price data could not be fetched for this query '
+            '(the data source may be temporarily unavailable). '
+            'Say you were unable to retrieve the current price and suggest the user '
+            'check stooq.com or finance.yahoo.com directly. '
+            'Do NOT say you have no internet access.'
+        )
+
+    logger.info('Calling Sonnet: market=%r ddg_chars=%d', bool(market), len(ddg))
     result = _anthropic_post({
         'model': 'claude-sonnet-4-6',
         'max_tokens': 512,
         'system': (
             'You are a financial research assistant specialising in Polish equities '
             'and index inclusion (MSCI Poland, FTSE Poland). '
-            'Answer the user question using the data provided above. '
-            'State the price and change if available. Be concise. Plain text only, no Markdown.'
+            f'{data_note} '
+            'Be concise. Plain text only, no Markdown.'
         ),
         'messages': [{'role': 'user', 'content': context + user_text}],
     }, timeout=60)
